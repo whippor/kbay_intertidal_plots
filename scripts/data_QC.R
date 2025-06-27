@@ -37,7 +37,8 @@ library(readxl)
 library(janitor)
 library(fuzzyjoin)
 library(stringdist)
-
+library(viridis)
+library(vegan)
 
 parse_xlsx <- function(path, start = 1, end = 10) {
   sheets <- c(start:end)
@@ -74,10 +75,14 @@ parse_xlsx <- function(path, start = 1, end = 10) {
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 # read all sheets and combine into single dataframe
-parse_xlsx("data/raw/ClearedPlots.xlsx", start = 1, end = 21)
+parse_xlsx("data/raw/ClearedPlots.xlsx", start = 1, end = 24)
+
+# filter out summary rows
+core_data <- joined_data |>
+  filter(TRIPLET != "0")
 
 # make columns numeric
-numeric_data <- joined_data |>
+numeric_data <- core_data |>
   mutate_at(vars(`FUCUS%TOTAL`:`FUCUS SPORELINGS%`, Ulva:`ANTHOPL ARTEMESIA`), as.numeric)
 
 # identify duplicated columns
@@ -89,6 +94,7 @@ matched_names <- names1 |>
                             colnames.numeric_data..y, 
                             method="lv")) |>
   filter(colnames.numeric_data..x != colnames.numeric_data..y)
+rm(names1, names2)
 
 # join duplicated columns
 combined_cols <- numeric_data |>
@@ -108,7 +114,8 @@ combined_cols <- numeric_data |>
     Callithamnion = sum(Callithamnion,
                                `Callitham pikeanum`,
                                `Callithamnion pikeanum`,
-                               CALLITHAMNION),
+                               CALLITHAMNION,
+                        callithamnion),
     Pterosiphonia = sum(Pterosiphonia,
                              PTEROSIPHONIA),
     Polysiphonia = sum(Polysiphonia,
@@ -127,7 +134,8 @@ combined_cols <- numeric_data |>
                           `Margarites marg`,
                           `margarities small iridescent snail`),
     Palmaria = sum(`Palmaria callophylloides`,
-                        PALMARIA),
+                        PALMARIA,
+                   `Palmaria cal.`),
     Elachista = sum(Elachista,
                          ELACHISTA),
     Mytilus = sum(Mytilus,
@@ -198,37 +206,91 @@ combined_cols <- numeric_data |>
          -NEORHODOMELA, -COLPOMENIA, -`ERECT CORALLINE`, -`erect coralline`,
          -LOTTIIDAE, -BUCCINUM, -LEPTASTERIAS, -EMPLECTONEMA, -AMPHIPORUS,
          -ONCHIDELLA, -PARANEMERTES, -SPIRORBIDAE, -`ANTHOPL ARTEMESIA`,
-         -ENTEROMORPHA,
+         -ENTEROMORPHA, -PALMARIA, -`Palmaria callophylloides`,
          -ROCK,
          -`BARE ROCK`,
          -`SAND-GRAVEL`,
          -`BOULDER-COBBLE`)
 
-# identify duplicated columns
-names1 <- data.frame(colnames(combined_cols))
-names2 <- names1
-matched_names <- names1 |>
-  stringdist_left_join(names2,method="lv", max_dist=5) |>
-  mutate(lv_dist=stringdist(colnames.combined_cols..x,
-                            colnames.combined_cols..y, 
-                            method="lv")) |>
-  filter(colnames.combined_cols..x != colnames.combined_cols..y)
+plot_data_QAQC <- combined_cols
 
-sum(combined_cols$Odonthalia)
-sum(numeric_data$Odonthalia) + sum(numeric_data$ODONTHALIA)
-
-test <- numeric_data |>
-  select(Gloiopeltis, GLOIOPELTIS)
-test1 <- combined_cols |>
-  select(Gloiopeltis) |>
-  mutate(Glo1 = Gloiopeltis) |>
-  select(Glo1) |>
-  bind_cols(test)
+write_csv(file = "data/QAQC/all_plots_QAQC", plot_data_QAQC)
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-# MANIPULATE DATA                                                           ####
+# VISUALIZATIONS                                                            ####
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
+# Littorine abundance across Years
+plot_data_QAQC |>
+  mutate(Year = as.numeric(Year)) |>
+  select(Year, `L scutulata`, `L sitkana`, QUAD) |>
+  pivot_longer(`L scutulata`:`L sitkana`, names_to = "species", values_to = "count") |>
+  ggplot(aes(x = Year, y = count, color = species)) +
+  geom_point() +
+  geom_smooth() +
+  scale_color_viridis(discrete = TRUE, option = "magma", 
+                      begin = 0.2, end = 0.8) +
+  theme_bw()
+
+# Richness/Diversity across years
+div_mat <- plot_data_QAQC |>
+  select(-`Ralfsia/Hild`, -Petrocelia, -Lepidochiton, -Acrosiphonia, -`irridescent snail (Homalopoma?)`,
+         -`Hiatella arctica`, -Flatworm, -EPIACTIS, -`coralline crust`, -`Erect coralline`)
+  select(`FUCUS%TOTAL`, Ulva:`Erect coralline`) 
+
+# Richness per quad
+spec_quads <- specnumber(div_mat) |>
+  enframe() |>
+  bind_cols(plot_data_QAQC)
+
+# Richness by year
+spec_quads |>
+  mutate(Year = as.numeric(Year)) |>
+  select(Year, value, QUAD) |>
+  ggplot(aes(x = Year, y = value, color = QUAD)) +
+  geom_point() +
+  geom_smooth(method = lm, se = FALSE) +
+  scale_color_viridis(discrete = TRUE, option = "turbo") +
+  theme_bw()
+  
+# nMDS of community by year
+  
+div_summary <- plot_data_QAQC |>
+  select(Year, QUAD, `FUCUS%TOTAL`, Ulva:`Erect coralline`) |>
+  pivot_longer(`FUCUS%TOTAL`:`Erect coralline`, names_to = "Species", values_to = "Count") |>
+    group_by(Year, Species) |>
+    summarise(Avg = mean(Count))
+  
+div_summary_wide <- div_summary |>
+    pivot_wider(id_cols = c(Year), 
+                names_from = Species, 
+                values_from = Avg,
+                values_fill = 0)
+div_summary_wide <- replace(div_summary_wide, is.na(div_summary_wide), 0)
+  
+coverMDS <- metaMDS(div_summary_wide[,2:58], distance = "altGower")
+  
+  
+# extract the 'points' from the nMDS that you will plot in ggplot2
+coverMDS_points <- coverMDS$points
+# turn those plot points into a dataframe that ggplot2 can read
+coverMDS_points <- data.frame(coverMDS_points)
+# join your plot points with your summed species observations from each habitat type
+plot_data_tax <- data.frame(coverMDS_points, div_summary_wide[,1])
+  
+  
+  
+# run the ggplot
+ggplot(plot_data_tax, aes(x=MDS1, y=MDS2,
+                          color = Year, label = Year, group = 1)) + 
+  labs(x = "nMDS1", y = "nMDS2") +
+  theme_classic() + 
+  geom_point(size =  4) + 
+  scale_color_viridis(discrete = TRUE, begin = 0.2, end = 0.9, option = "G", name = "Year") +
+  geom_text(hjust=0, vjust=-.5) +
+  geom_path(arrow = arrow(angle = 15, ends = "last", type = "closed"))
+
+  
 
 ############### SUBSECTION HERE
 
